@@ -21,6 +21,19 @@ let isDiscoveryInProgress = false;
 // Add an AbortController to cancel fetch operations
 let discoveryController = null;
 
+// Clone session state
+let cloneProgressSocket = null;
+let cloneProgressReconnectTimer = null;
+let cloneProgressTargetKey = null;
+let cloneProgressManuallyClosed = false;
+let cloneRequestPending = false;
+const CLONE_PROGRESS_RECONNECT_DELAY = 5000;
+const pendingCloneSessions = new Set();
+let latestCloneStatus = {
+  state: "idle",
+  text: "Connect to the browser tools server to start a clone session.",
+};
+
 // Load saved settings on startup
 chrome.storage.local.get(["browserConnectorSettings"], (result) => {
   if (result.browserConnectorSettings) {
@@ -153,6 +166,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
   }
+
+  if (message.type === "CLONE_SESSION_ERROR") {
+    if (message.sessionId) {
+      pendingCloneSessions.delete(message.sessionId);
+    }
+    cloneRequestPending = false;
+    updateCloneControlsState();
+    updateCloneStatus(
+      "error",
+      message.error ||
+        "Clone session failed. Check the browser-tools server logs for details."
+    );
+  }
+
+  if (message.type === "CLONE_SESSION_EVENT" && message.event && message.session) {
+    handleCloneProgressEvent(message.event, message.session);
+  }
 });
 
 // Create connection status banner
@@ -269,6 +299,12 @@ function updateConnectionBanner(connected, serverInfo) {
 
   if (!indicator || !statusText || !banner || !reconnectButton) return;
 
+  if (connected) {
+    ensureCloneProgressSocket();
+  } else {
+    disconnectCloneProgressSocket();
+  }
+
   if (connected && serverInfo) {
     // Connected state with server info
     indicator.style.backgroundColor = "#4CAF50"; // Green indicator
@@ -317,6 +353,10 @@ const showResponseHeadersCheckbox = document.getElementById(
 const maxLogSizeInput = document.getElementById("max-log-size");
 const screenshotPathInput = document.getElementById("screenshot-path");
 const captureScreenshotButton = document.getElementById("capture-screenshot");
+const clonePageButton = document.getElementById("clone-page");
+const cloneSelectionButton = document.getElementById("clone-selection");
+const cloneStatusIndicator = document.getElementById("clone-status-indicator");
+const cloneStatusText = document.getElementById("clone-status-text");
 
 // Server connection UI elements
 const serverHostInput = document.getElementById("server-host");
@@ -344,6 +384,9 @@ advancedSettingsHeader.addEventListener("click", () => {
 // Get all inputs by ID
 const allowAutoPasteCheckbox = document.getElementById("allow-auto-paste");
 
+renderCloneStatus();
+updateCloneControlsState();
+
 // Update UI from settings
 function updateUIFromSettings() {
   logLimitInput.value = settings.logLimit;
@@ -356,6 +399,336 @@ function updateUIFromSettings() {
   serverHostInput.value = settings.serverHost;
   serverPortInput.value = settings.serverPort;
   allowAutoPasteCheckbox.checked = settings.allowAutoPaste;
+}
+
+function updateCloneStatus(state, text) {
+  latestCloneStatus = { state, text };
+  renderCloneStatus();
+}
+
+function renderCloneStatus() {
+  if (!cloneStatusIndicator || !cloneStatusText) {
+    return;
+  }
+
+  const allowedStates = new Set(["idle", "active", "success", "error"]);
+  const stateClass = allowedStates.has(latestCloneStatus.state)
+    ? latestCloneStatus.state
+    : "idle";
+
+  cloneStatusIndicator.className = `clone-status-indicator ${stateClass}`;
+  cloneStatusText.textContent = latestCloneStatus.text;
+}
+
+function updateCloneControlsState() {
+  const shouldDisable = cloneRequestPending || pendingCloneSessions.size > 0;
+
+  if (clonePageButton) {
+    clonePageButton.disabled = shouldDisable;
+  }
+
+  if (cloneSelectionButton) {
+    cloneSelectionButton.disabled = shouldDisable;
+  }
+}
+
+function shortenSessionId(sessionId) {
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    return "UNKNOWN";
+  }
+  return sessionId.slice(0, 8).toUpperCase();
+}
+
+function triggerCloneSession(scope) {
+  if (cloneRequestPending || pendingCloneSessions.size > 0) {
+    updateCloneStatus(
+      "active",
+      "A clone session is already in progress. Please wait for it to finish."
+    );
+    return;
+  }
+
+  if (!serverConnected) {
+    updateCloneStatus(
+      "error",
+      "Connect to the browser tools server before starting a clone session."
+    );
+    return;
+  }
+
+  const scopeLabel = scope === "selection" ? "selection" : "page";
+  cloneRequestPending = true;
+  updateCloneControlsState();
+  updateCloneStatus("active", `Requesting ${scopeLabel} clone session...`);
+
+  chrome.runtime.sendMessage(
+    {
+      type: "START_CLONE_SESSION",
+      scope,
+      tabId: chrome.devtools.inspectedWindow.tabId,
+    },
+    (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        console.error("Clone session request failed:", runtimeError);
+        cloneRequestPending = false;
+        updateCloneControlsState();
+        updateCloneStatus(
+          "error",
+          runtimeError.message || "Failed to trigger clone session."
+        );
+        return;
+      }
+
+      if (!response || !response.success) {
+        const errorMessage =
+          response && response.error
+            ? response.error
+            : "Failed to start clone session.";
+        cloneRequestPending = false;
+        updateCloneControlsState();
+        updateCloneStatus("error", errorMessage);
+        return;
+      }
+
+      const session = response.session;
+      if (session && session.sessionId) {
+        pendingCloneSessions.add(session.sessionId);
+        const prefix = scope === "selection" ? "Selection" : "Page";
+        updateCloneStatus(
+          "active",
+          `${prefix} clone session ${shortenSessionId(
+            session.sessionId
+          )} started — waiting for progress updates...`
+        );
+      } else {
+        updateCloneStatus(
+          "active",
+          "Clone session started. Waiting for progress updates..."
+        );
+      }
+
+      cloneRequestPending = false;
+      updateCloneControlsState();
+    }
+  );
+}
+
+function ensureCloneProgressSocket() {
+  if (!serverConnected) {
+    disconnectCloneProgressSocket();
+    return;
+  }
+
+  const targetKey = `${settings.serverHost}:${settings.serverPort}`;
+
+  if (
+    cloneProgressSocket &&
+    cloneProgressTargetKey === targetKey &&
+    (cloneProgressSocket.readyState === WebSocket.OPEN ||
+      cloneProgressSocket.readyState === WebSocket.CONNECTING)
+  ) {
+    return;
+  }
+
+  disconnectCloneProgressSocket();
+
+  try {
+    const socket = new WebSocket(
+      `ws://${settings.serverHost}:${settings.serverPort}/clone/progress`
+    );
+
+    cloneProgressSocket = socket;
+    cloneProgressTargetKey = targetKey;
+
+    socket.addEventListener("open", () => {
+      console.log("Clone progress WebSocket connected", targetKey);
+      if (!cloneRequestPending && pendingCloneSessions.size === 0) {
+        updateCloneStatus(
+          "idle",
+          "Listening for clone progress updates from the server."
+        );
+      }
+    });
+
+    socket.addEventListener("message", (event) => {
+      handleCloneProgressSocketMessage(event.data);
+    });
+
+    socket.addEventListener("close", () => {
+      const wasManual = cloneProgressManuallyClosed;
+      cloneProgressManuallyClosed = false;
+      cloneProgressSocket = null;
+      cloneProgressTargetKey = null;
+
+      if (wasManual) {
+        return;
+      }
+
+      if (serverConnected) {
+        scheduleCloneProgressReconnect();
+        const reconnectMessage =
+          pendingCloneSessions.size > 0
+            ? "Clone progress stream disconnected. Attempting to reconnect..."
+            : "Clone progress stream disconnected. Attempting to reconnect...";
+        updateCloneStatus(
+          pendingCloneSessions.size > 0 ? "active" : "idle",
+          reconnectMessage
+        );
+      }
+    });
+
+    socket.addEventListener("error", (error) => {
+      console.error("Clone progress WebSocket error", error);
+      socket.close();
+    });
+  } catch (error) {
+    console.error("Failed to connect to clone progress stream", error);
+    scheduleCloneProgressReconnect();
+  }
+}
+
+function disconnectCloneProgressSocket() {
+  if (cloneProgressReconnectTimer) {
+    clearTimeout(cloneProgressReconnectTimer);
+    cloneProgressReconnectTimer = null;
+  }
+
+  if (cloneProgressSocket) {
+    cloneProgressManuallyClosed = true;
+    try {
+      cloneProgressSocket.close();
+    } catch (error) {
+      console.error("Error closing clone progress WebSocket", error);
+    }
+  }
+
+  cloneProgressSocket = null;
+  cloneProgressTargetKey = null;
+
+  if (
+    !serverConnected &&
+    !cloneRequestPending &&
+    pendingCloneSessions.size === 0
+  ) {
+    updateCloneStatus(
+      "idle",
+      "Connect to the browser tools server to start a clone session."
+    );
+  }
+}
+
+function scheduleCloneProgressReconnect() {
+  if (cloneProgressReconnectTimer) {
+    return;
+  }
+
+  cloneProgressReconnectTimer = setTimeout(() => {
+    cloneProgressReconnectTimer = null;
+    ensureCloneProgressSocket();
+  }, CLONE_PROGRESS_RECONNECT_DELAY);
+}
+
+function handleCloneProgressSocketMessage(rawData) {
+  try {
+    const payload = JSON.parse(rawData);
+    if (payload.type === "clone:progress" && payload.event && payload.session) {
+      handleCloneProgressEvent(payload.event, payload.session);
+    } else if (
+      payload.type === "clone:snapshot" &&
+      Array.isArray(payload.sessions)
+    ) {
+      handleCloneProgressSnapshot(payload.sessions);
+    }
+  } catch (error) {
+    console.error("Failed to parse clone progress message", error, rawData);
+  }
+}
+
+function handleCloneProgressSnapshot(sessions) {
+  if (!Array.isArray(sessions)) {
+    return;
+  }
+
+  if (sessions.length === 0) {
+    pendingCloneSessions.clear();
+    updateCloneControlsState();
+    if (!cloneRequestPending) {
+      updateCloneStatus("idle", "No clone session activity yet.");
+    }
+    return;
+  }
+
+  pendingCloneSessions.clear();
+
+  let latestSession = null;
+  let latestTimestamp = 0;
+
+  for (const session of sessions) {
+    const lastProgress = session.lastProgress;
+    if (lastProgress) {
+      const timestamp = Date.parse(lastProgress.timestamp);
+      if (!Number.isNaN(timestamp) && timestamp >= latestTimestamp) {
+        latestTimestamp = timestamp;
+        latestSession = session;
+      }
+
+      if (
+        lastProgress.phase !== "completed" &&
+        lastProgress.phase !== "failed"
+      ) {
+        pendingCloneSessions.add(session.sessionId);
+      }
+    }
+  }
+
+  updateCloneControlsState();
+
+  if (latestSession && latestSession.lastProgress) {
+    handleCloneProgressEvent(latestSession.lastProgress, latestSession);
+  }
+}
+
+function handleCloneProgressEvent(event, session) {
+  if (!event || !session) {
+    return;
+  }
+
+  if (
+    event.phase === "completed" ||
+    event.phase === "failed"
+  ) {
+    pendingCloneSessions.delete(event.sessionId);
+  } else {
+    pendingCloneSessions.add(event.sessionId);
+  }
+
+  const scopeLabel = session.scope === "selection" ? "Selection" : "Page";
+  const shortId = shortenSessionId(session.sessionId);
+
+  const progressText =
+    typeof event.progress === "number" &&
+    event.progress >= 0 &&
+    event.progress <= 1 &&
+    event.phase !== "completed" &&
+    event.phase !== "failed"
+      ? ` (${Math.round(event.progress * 100)}%)`
+      : "";
+
+  let description = `${scopeLabel} session ${shortId}: ${event.phase}${progressText}`;
+  if (event.message) {
+    description += ` – ${event.message}`;
+  }
+
+  const state =
+    event.phase === "failed"
+      ? "error"
+      : event.phase === "completed"
+      ? "success"
+      : "active";
+
+  updateCloneStatus(state, description);
+  updateCloneControlsState();
 }
 
 // Save settings
@@ -424,6 +797,16 @@ allowAutoPasteCheckbox.addEventListener("change", (e) => {
   settings.allowAutoPaste = e.target.checked;
   saveSettings();
 });
+
+if (clonePageButton) {
+  clonePageButton.addEventListener("click", () => triggerCloneSession("page"));
+}
+
+if (cloneSelectionButton) {
+  cloneSelectionButton.addEventListener("click", () =>
+    triggerCloneSession("selection")
+  );
+}
 
 // Function to cancel any ongoing discovery operations
 function cancelOngoingDiscovery() {
