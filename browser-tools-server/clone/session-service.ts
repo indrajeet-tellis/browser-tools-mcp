@@ -1,7 +1,7 @@
 import type { Application, Request, Response } from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer } from "http";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import os from "os";
@@ -13,6 +13,7 @@ import type {
   CloneProgressEvent,
   CloneProgressPhase,
   CloneSnapshotChunk,
+  CloneSnapshotPayloadType,
 } from "./types.js";
 
 interface SessionRecord extends CloneSessionMetadata {
@@ -45,10 +46,12 @@ interface SnapshotMessage {
 }
 
 interface SnapshotState {
-  writeStream: fs.WriteStream;
+  payloadType: CloneSnapshotPayloadType;
+  writeStream?: fs.WriteStream;
   expectedChunks: number;
   receivedChunks: number;
   filePath: string;
+  buffers?: string[];
 }
 
 export class CloneSessionService {
@@ -56,7 +59,7 @@ export class CloneSessionService {
   private readonly progressServer = new WebSocketServer({ noServer: true });
   private readonly progressClients = new Set<WebSocket>();
   private readonly sessionsRoot: string;
-  private readonly snapshotStates = new Map<string, SnapshotState>();
+  private readonly snapshotStates = new Map<string, Map<string, SnapshotState>>();
 
   constructor(private readonly app: Application) {
     this.sessionsRoot = path.join(os.tmpdir(), "browser-tools-clone");
@@ -130,7 +133,7 @@ export class CloneSessionService {
             record.notes = body.notes;
           }
 
-          await this.closeSnapshot(sessionId);
+          await this.finalizeAllSnapshots(sessionId);
 
           const phase: CloneProgressPhase =
             nextStatus === "failed" ? "failed" : "completed";
@@ -263,7 +266,7 @@ export class CloneSessionService {
     const snapshotSessionIds = Array.from(this.snapshotStates.keys());
     for (const sessionId of snapshotSessionIds) {
       try {
-        await this.closeSnapshot(sessionId);
+        await this.finalizeAllSnapshots(sessionId);
       } catch (error) {
         console.error("Failed to close snapshot writer", error);
       }
@@ -323,19 +326,38 @@ export class CloneSessionService {
     record: SessionRecord,
     chunk: CloneSnapshotChunk
   ) {
-    let state = this.snapshotStates.get(record.sessionId);
+    const payloadType: CloneSnapshotPayloadType = chunk.payloadType || "dom";
+
+    let sessionStates = this.snapshotStates.get(record.sessionId);
+    if (!sessionStates) {
+      sessionStates = new Map<string, SnapshotState>();
+      this.snapshotStates.set(record.sessionId, sessionStates);
+    }
+
+    let state = sessionStates.get(payloadType);
 
     if (!state) {
-      const filePath = path.join(record.workspacePath, "dom-snapshot.json");
+      const filePath = this.resolveSnapshotFilePath(
+        record.workspacePath,
+        payloadType
+      );
       await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-      const writeStream = fs.createWriteStream(filePath, { flags: "w" });
+
+      const writeStream =
+        payloadType === "dom"
+          ? fs.createWriteStream(filePath, { flags: "w" })
+          : undefined;
+
       state = {
+        payloadType,
         writeStream,
         expectedChunks: chunk.totalChunks,
         receivedChunks: 0,
         filePath,
+        buffers: payloadType === "dom" ? undefined : [],
       };
-      this.snapshotStates.set(record.sessionId, state);
+
+      sessionStates.set(payloadType, state);
     }
 
     if (state.expectedChunks !== chunk.totalChunks) {
@@ -348,13 +370,17 @@ export class CloneSessionService {
       );
     }
 
-    const encoding = chunk.payloadFormat === "base64" ? "base64" : "utf8";
-    const writeResult = state.writeStream.write(chunk.payload, encoding);
+    if (state.writeStream) {
+      const encoding = chunk.payloadFormat === "base64" ? "base64" : "utf8";
+      const writeResult = state.writeStream.write(chunk.payload, encoding);
 
-    if (!writeResult) {
-      await new Promise<void>((resolve) =>
-        state?.writeStream.once("drain", resolve)
-      );
+      if (!writeResult) {
+        await new Promise<void>((resolve) =>
+          state?.writeStream?.once("drain", resolve)
+        );
+      }
+    } else if (state.buffers) {
+      state.buffers.push(chunk.payload);
     }
 
     state.receivedChunks += 1;
@@ -365,36 +391,170 @@ export class CloneSessionService {
         ? Math.min(state.receivedChunks / state.expectedChunks, 1)
         : 1;
 
-    this.recordProgress({
-      sessionId: record.sessionId,
-      phase: "capturingDom",
-      progress,
-      message: `Captured ${state.receivedChunks}/${state.expectedChunks} DOM chunks`,
-      timestamp: new Date().toISOString(),
-    });
+    const phase = this.resolveProgressPhase(payloadType);
+    if (phase) {
+      this.recordProgress({
+        sessionId: record.sessionId,
+        phase,
+        progress,
+        message: `Captured ${state.receivedChunks}/${state.expectedChunks} ${payloadType} chunks`,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     if (state.receivedChunks >= state.expectedChunks) {
-      await this.closeSnapshot(record.sessionId);
+      await this.finalizeSnapshot(record.sessionId, payloadType, state);
     }
   }
 
-  private async closeSnapshot(sessionId: string) {
-    const state = this.snapshotStates.get(sessionId);
-    if (!state) {
+  private resolveProgressPhase(
+    payloadType: CloneSnapshotPayloadType
+  ): CloneProgressPhase | undefined {
+    switch (payloadType) {
+      case "dom":
+        return "capturingDom";
+      case "styles":
+        return "capturingStyles";
+      case "assets":
+        return "capturingAssets";
+      case "interactions":
+        return "capturingInteractions";
+      case "responsive":
+        return "capturingResponsiveStates";
+      default:
+        return undefined;
+    }
+  }
+
+  private resolveSnapshotFilePath(
+    workspacePath: string,
+    payloadType: CloneSnapshotPayloadType
+  ) {
+    switch (payloadType) {
+      case "dom":
+        return path.join(workspacePath, "dom-snapshot.json");
+      case "styles":
+        return path.join(workspacePath, "styles.json");
+      case "assets":
+        return path.join(workspacePath, "assets.json");
+      case "interactions":
+        return path.join(workspacePath, "interactions.json");
+      case "responsive":
+        return path.join(workspacePath, "responsive.json");
+      default:
+        return path.join(workspacePath, `${payloadType}.json`);
+    }
+  }
+
+  private async finalizeSnapshot(
+    sessionId: string,
+    payloadType: CloneSnapshotPayloadType,
+    state: SnapshotState
+  ) {
+    if (state.writeStream) {
+      await new Promise<void>((resolve, reject) => {
+        state.writeStream.end((error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+    } else if (state.buffers) {
+      const combined = state.buffers.join("");
+      await this.persistBufferedSnapshot(state.filePath, payloadType, combined);
+      state.buffers = [];
+    }
+
+    const sessionStates = this.snapshotStates.get(sessionId);
+    sessionStates?.delete(payloadType);
+    if (sessionStates && sessionStates.size === 0) {
+      this.snapshotStates.delete(sessionId);
+    }
+  }
+
+  private async persistBufferedSnapshot(
+    filePath: string,
+    payloadType: CloneSnapshotPayloadType,
+    rawPayload: string
+  ) {
+    if (payloadType === "styles") {
+      try {
+        const parsed = JSON.parse(rawPayload);
+        const normalized = this.dedupeStylesheets(parsed);
+        await fs.promises.writeFile(
+          filePath,
+          JSON.stringify(normalized, null, 2),
+          "utf8"
+        );
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to normalize stylesheet payload; writing raw data",
+          error
+        );
+      }
+    }
+
+    await fs.promises.writeFile(filePath, rawPayload, "utf8");
+  }
+
+  private dedupeStylesheets(payload: any) {
+    const stylesheets = Array.isArray(payload?.stylesheets)
+      ? payload.stylesheets
+      : [];
+    const computedStyles = Array.isArray(payload?.computedStyles)
+      ? payload.computedStyles
+      : [];
+    const capturedAt =
+      typeof payload?.capturedAt === "string"
+        ? payload.capturedAt
+        : new Date().toISOString();
+
+    const deduped: any[] = [];
+    const seen = new Map<string, string>();
+
+    for (const sheet of stylesheets) {
+      if (!sheet || typeof sheet !== "object") {
+        continue;
+      }
+
+      const href = typeof sheet.href === "string" ? sheet.href : null;
+      const content = typeof sheet.content === "string" ? sheet.content : "";
+      const hash = createHash("sha256").update(content).digest("hex");
+      const key = href ? href : `${sheet.type || "inline"}:${hash}`;
+
+      const previousHash = seen.get(key);
+      if (previousHash === hash) {
+        continue;
+      }
+
+      seen.set(key, hash);
+
+      deduped.push({
+        ...sheet,
+        hash,
+      });
+    }
+
+    return {
+      capturedAt,
+      stylesheets: deduped,
+      computedStyles,
+    };
+  }
+
+  private async finalizeAllSnapshots(sessionId: string) {
+    const sessionStates = this.snapshotStates.get(sessionId);
+    if (!sessionStates) {
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      state.writeStream.end((error) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve();
-        }
-      });
-    });
-
-    this.snapshotStates.delete(sessionId);
+    const entries = Array.from(sessionStates.entries());
+    for (const [payloadType, state] of entries) {
+      await this.finalizeSnapshot(sessionId, payloadType as CloneSnapshotPayloadType, state);
+    }
   }
 
   private emitProgress(sessionId: string, event: CloneProgressEvent) {
