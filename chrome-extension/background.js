@@ -73,6 +73,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleStartCloneSession(message, sendResponse);
     return true;
   }
+
+  if (message.type === "CLONE_SNAPSHOT_CHUNK" && message.chunk) {
+    handleCloneSnapshotChunk(message.chunk, sendResponse);
+    return true;
+  }
 });
 
 // Validate server identity
@@ -176,14 +181,16 @@ async function handleStartCloneSession(message, sendResponse) {
       lastProgress: initialEvent,
     });
 
-    finalizeCloneSession(session, settings, scope).catch((error) => {
-      reportCloneSessionError(
-        session.sessionId,
-        error instanceof Error
-          ? error.message
-          : "Failed to complete clone session."
-      );
-    });
+    triggerDomSnapshot(session, scope)
+      .then(() => finalizeCloneSession(session, settings, scope))
+      .catch((error) => {
+        reportCloneSessionError(
+          session.sessionId,
+          error instanceof Error
+            ? error.message
+            : "Failed to process DOM snapshot."
+        );
+      });
   } catch (error) {
     console.error("Error starting clone session:", error);
     const messageText =
@@ -227,6 +234,79 @@ async function finalizeCloneSession(session, settings, scope) {
     updatedAt: completionEvent.timestamp,
     lastProgress: completionEvent,
   });
+}
+
+function triggerDomSnapshot(session, scope) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "CAPTURE_DOM_SNAPSHOT",
+        session,
+        options: { scope },
+      },
+      (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+
+        if (!response || !response.success) {
+          reject(
+            new Error(
+              response && response.error
+                ? response.error
+                : "DOM snapshot capture failed."
+            )
+          );
+          return;
+        }
+
+        resolve();
+      }
+    );
+  });
+}
+
+async function handleCloneSnapshotChunk(chunk, sendResponse) {
+  try {
+    if (!chunk || !chunk.sessionId) {
+      sendResponse({ success: false, error: "Invalid snapshot chunk payload." });
+      return;
+    }
+
+    const settings = await getConnectorSettings();
+    const response = await fetch(
+      `http://${settings.serverHost}:${settings.serverPort}/clone/session/${encodeURIComponent(
+        chunk.sessionId
+      )}/chunk`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(chunk),
+        signal: AbortSignal.timeout(5000),
+      }
+    );
+
+    if (!response.ok) {
+      sendResponse({
+        success: false,
+        error: `Snapshot chunk rejected (${response.status}).`,
+      });
+      return;
+    }
+
+    sendResponse({ success: true });
+  } catch (error) {
+    console.error("Failed to deliver snapshot chunk:", error);
+    sendResponse({
+      success: false,
+      error:
+        error instanceof Error
+          ? error.message
+          : "Snapshot chunk delivery failed.",
+    });
+  }
 }
 
 function delay(ms) {

@@ -12,6 +12,7 @@ A powerful browser tools server for capturing and managing browser events, logs,
 - Configurable log limits and settings
 - Lighthouse-powered accessibility, performance, SEO, and best practices audits
 - Clone session lifecycle scaffolding with REST endpoints and WebSocket progress streaming
+- DOM snapshot ingestion pipeline for storing chunked capture data per session
 
 ## Installation
 
@@ -53,6 +54,7 @@ npx @agentdeskai/browser-tools-server
 - `/clone/session/finish` - Mark a clone session as completed or failed
 - `/clone/session/:sessionId` - Inspect a specific session summary
 - `/clone/sessions` - List known clone sessions
+- `/clone/session/:sessionId/chunk` - Append a DOM snapshot chunk to the active session
 - `ws://<host>:<port>/clone/progress` - Subscribe to clone progress events
 
 ## API Documentation
@@ -79,6 +81,7 @@ npx @agentdeskai/browser-tools-server
 - `POST /seo-audit` - Run a SEO audit on the current page
 - `POST /clone/session/start` - Allocate workspace and begin a clone session
 - `POST /clone/session/finish` - Update the status of an existing clone session
+- `POST /clone/session/:sessionId/chunk` - Stream DOM snapshot chunks into the session workspace
 
 # Audit Functionality
 

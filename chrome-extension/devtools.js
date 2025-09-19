@@ -20,6 +20,9 @@ let attachDebuggerRetries = 0;
 const currentTabId = chrome.devtools.inspectedWindow.tabId;
 const MAX_ATTACH_RETRIES = 3;
 const ATTACH_RETRY_DELAY = 1000; // 1 second
+const SNAPSHOT_CHUNK_SIZE = 64 * 1024; // 64KB chunks for DOM snapshot streaming
+
+let captureScriptSourcePromise = null;
 
 // Load saved settings on startup
 chrome.storage.local.get(["browserConnectorSettings"], (result) => {
@@ -107,6 +110,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Try to reestablish the WebSocket connection
       setupWebSocket();
     }
+  }
+
+  if (message.type === "CAPTURE_DOM_SNAPSHOT" && message.session) {
+    handleCaptureDomSnapshot(message.session, message.options || {})
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.error("DOM snapshot capture failed:", error);
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
   }
 });
 
@@ -348,6 +361,185 @@ async function sendToBrowserConnector(logData) {
     .catch((error) => {
       console.error("Error sending log:", error);
     });
+}
+
+function evalInInspectedWindow(expression) {
+  return new Promise((resolve, reject) => {
+    chrome.devtools.inspectedWindow.eval(expression, (result, isException) => {
+      if (isException) {
+        const message =
+          result && typeof result === "object" && result.value
+            ? result.value
+            : typeof result === "string"
+            ? result
+            : "Unknown evaluation error";
+        reject(new Error(message));
+      } else {
+        resolve(result);
+      }
+    });
+  });
+}
+
+async function loadCaptureScriptSource() {
+  if (!captureScriptSourcePromise) {
+    captureScriptSourcePromise = fetch(chrome.runtime.getURL("capture-dom.js"))
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to load capture script (${response.status})`);
+        }
+        return response.text();
+      })
+      .catch((error) => {
+        captureScriptSourcePromise = null;
+        throw error;
+      });
+  }
+  return captureScriptSourcePromise;
+}
+
+async function ensureCaptureScriptInjected() {
+  try {
+    const alreadyAvailable = await evalInInspectedWindow(
+      "(function(){ return !!window.__browserToolsCaptureDomSnapshot; })();"
+    );
+
+    if (alreadyAvailable === true) {
+      return;
+    }
+  } catch (error) {
+    console.warn("Error checking capture script availability:", error);
+  }
+
+  const source = await loadCaptureScriptSource();
+  const injectionExpression = `(function(){ try { (0, eval)(${JSON.stringify(
+    source
+  )}); return !!window.__browserToolsCaptureDomSnapshot; } catch (error) { return { error: error.message }; } })();`;
+
+  const result = await evalInInspectedWindow(injectionExpression);
+
+  if (result && typeof result === "object" && result.error) {
+    throw new Error(result.error);
+  }
+
+  if (result !== true) {
+    throw new Error("Failed to inject DOM capture script");
+  }
+}
+
+function chunkString(value, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < value.length; index += chunkSize) {
+    chunks.push(value.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function deliverSnapshotChunk(chunk) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "CLONE_SNAPSHOT_CHUNK",
+        chunk,
+      },
+      (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          reject(new Error(lastError.message));
+          return;
+        }
+
+        if (!response || !response.success) {
+          reject(
+            new Error(
+              response && response.error
+                ? response.error
+                : "Snapshot chunk delivery failed."
+            )
+          );
+          return;
+        }
+
+        resolve();
+      }
+    );
+  });
+}
+
+async function streamSnapshotChunks(session, snapshotJson) {
+  const chunkId =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+
+  const chunks = chunkString(snapshotJson, SNAPSHOT_CHUNK_SIZE);
+  const totalChunks = chunks.length;
+
+  if (totalChunks === 0) {
+    await deliverSnapshotChunk({
+      sessionId: session.sessionId,
+      chunkId,
+      sequence: 0,
+      totalChunks: 1,
+      payloadType: "dom",
+      payloadFormat: "json",
+      payload: "",
+    });
+    return;
+  }
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const payload = chunks[index];
+    const chunkPayload = {
+      sessionId: session.sessionId,
+      chunkId,
+      sequence: index,
+      totalChunks,
+      payloadType: "dom",
+      payloadFormat: "json",
+      payload,
+    };
+
+    await deliverSnapshotChunk(chunkPayload);
+  }
+}
+
+async function handleCaptureDomSnapshot(session, options) {
+  await ensureCaptureScriptInjected();
+
+  const capturePayload = {
+    rootSelector: session.targetSelector || null,
+    scope: session.scope || options.scope || "page",
+    maxDepth: options.maxDepth,
+  };
+
+  const captureExpression = `(function(){
+    try {
+      const capture = window.__browserToolsCaptureDomSnapshot;
+      if (typeof capture !== "function") {
+        return { error: "Capture function not available" };
+      }
+      const result = capture(${JSON.stringify(capturePayload)});
+      if (typeof result !== "string") {
+        return { error: "Snapshot result was not a string" };
+      }
+      return { snapshot: result };
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  const result = await evalInInspectedWindow(captureExpression);
+
+  if (!result || result.error) {
+    throw new Error(result && result.error ? result.error : "Unknown capture failure");
+  }
+
+  if (typeof result.snapshot !== "string") {
+    throw new Error("Capture function returned an unexpected payload");
+  }
+
+  await streamSnapshotChunks(session, result.snapshot);
 }
 
 // Validate server identity
