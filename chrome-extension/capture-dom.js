@@ -156,6 +156,132 @@
     };
   }
 
+  const extractUrlsFromCssValue = (value) => {
+    if (!value || typeof value !== "string") {
+      return [];
+    }
+
+    const urls = [];
+    const regex = /url\((?:"([^"]+)"|'([^']+)'|([^"')]+))\)/g;
+    let match;
+    while ((match = regex.exec(value))) {
+      const candidate = match[1] || match[2] || match[3];
+      if (candidate && !candidate.startsWith("data:")) {
+        urls.push(candidate);
+      }
+    }
+    return urls;
+  };
+
+  const parseSrcSet = (value) => {
+    if (!value) {
+      return [];
+    }
+    return value
+      .split(",")
+      .map((entry) => entry.trim().split(/\s+/)[0])
+      .filter(Boolean)
+      .filter((url) => !url.startsWith("data:"));
+  };
+
+  function collectAssetCandidates(options = {}) {
+    const rootSelector =
+      typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
+        ? options.rootSelector.trim()
+        : null;
+
+    let targetRoot = document.documentElement;
+
+    if (rootSelector) {
+      const candidate = document.querySelector(rootSelector);
+      if (candidate) {
+        targetRoot = candidate;
+      }
+    }
+
+    const searchRoot =
+      targetRoot && targetRoot instanceof Element ? targetRoot : document;
+    const assets = [];
+    const seen = new Set();
+
+    const addAsset = (url, type, descriptor) => {
+      if (!url) {
+        return;
+      }
+      const trimmed = url.trim();
+      if (!trimmed || trimmed.startsWith("data:")) {
+        return;
+      }
+      if (seen.has(trimmed)) {
+        return;
+      }
+      seen.add(trimmed);
+      assets.push({ url: trimmed, type, descriptor });
+    };
+
+    const imageElements = searchRoot.querySelectorAll("img");
+    imageElements.forEach((img) => {
+      const source = img.currentSrc || img.src || img.getAttribute("src");
+      addAsset(source, "image", { tag: "img" });
+      parseSrcSet(img.getAttribute("srcset")).forEach((src) =>
+        addAsset(src, "image", { tag: "img" })
+      );
+    });
+
+    const sourceElements = searchRoot.querySelectorAll("source");
+    sourceElements.forEach((source) => {
+      const srcAttr = source.getAttribute("src");
+      addAsset(srcAttr, "image", { tag: "source" });
+      parseSrcSet(source.getAttribute("srcset")).forEach((src) =>
+        addAsset(src, "image", { tag: "source" })
+      );
+    });
+
+    const posterElements = searchRoot.querySelectorAll("video[poster]");
+    posterElements.forEach((video) => {
+      addAsset(video.getAttribute("poster"), "image", { tag: "video" });
+    });
+
+    const linkElements = searchRoot.querySelectorAll(
+      'link[rel~="icon"], link[rel="apple-touch-icon"], link[rel="mask-icon"], link[rel="preload"][as="image"]'
+    );
+    linkElements.forEach((link) => {
+      addAsset(link.href, "image", { tag: "link", rel: link.rel });
+    });
+
+    const baseTargets = [];
+    if (targetRoot instanceof Element) {
+      baseTargets.push(targetRoot, ...Array.from(targetRoot.children));
+    } else if (document.documentElement) {
+      baseTargets.push(document.documentElement);
+    }
+
+    baseTargets.forEach((element) => {
+      if (!(element instanceof Element)) {
+        return;
+      }
+      const style = window.getComputedStyle(element);
+      [
+        style.getPropertyValue("background-image"),
+        style.getPropertyValue("list-style-image"),
+        style.getPropertyValue("border-image-source"),
+      ].forEach((value) => {
+        extractUrlsFromCssValue(value).forEach((url) =>
+          addAsset(url, "style", { tag: element.tagName.toLowerCase() })
+        );
+      });
+    });
+
+    const baseElement = document.querySelector("base[href]");
+
+    return {
+      capturedAt: new Date().toISOString(),
+      documentUrl: window.location.href,
+      baseHref: baseElement ? baseElement.href : null,
+      assets,
+    };
+  }
+
   function getComputedStyles(options = {}) {
     const rootSelector =
       typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
@@ -196,4 +322,5 @@
   window.__browserToolsCaptureDomSnapshot = captureDomSnapshot;
   window.__browserToolsCollectStylesheets = collectStylesheets;
   window.__browserToolsGetComputedStyles = getComputedStyles;
+  window.__browserToolsCollectAssets = collectAssetCandidates;
 })();

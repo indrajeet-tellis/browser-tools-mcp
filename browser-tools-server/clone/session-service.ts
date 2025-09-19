@@ -15,6 +15,7 @@ import type {
   CloneSnapshotChunk,
   CloneSnapshotPayloadType,
 } from "./types.js";
+import { processAssetPayload } from "./asset-manager.js";
 
 interface SessionRecord extends CloneSessionMetadata {
   workspacePath: string;
@@ -492,6 +493,27 @@ export class CloneSessionService {
       } catch (error) {
         console.error(
           "Failed to normalize stylesheet payload; writing raw data",
+          error
+        );
+      }
+    }
+
+    if (payloadType === "assets") {
+      try {
+        const parsed = JSON.parse(rawPayload);
+        const manifest = await processAssetPayload(
+          path.dirname(filePath),
+          parsed
+        );
+        await fs.promises.writeFile(
+          filePath,
+          JSON.stringify(manifest, null, 2),
+          "utf8"
+        );
+        return;
+      } catch (error) {
+        console.error(
+          "Failed to process asset payload; writing raw data",
           error
         );
       }
