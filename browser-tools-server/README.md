@@ -11,6 +11,7 @@ A powerful browser tools server for capturing and managing browser events, logs,
 - WebSocket real-time communication
 - Configurable log limits and settings
 - Lighthouse-powered accessibility, performance, SEO, and best practices audits
+- Clone session lifecycle scaffolding with REST endpoints and WebSocket progress streaming
 
 ## Installation
 
@@ -48,6 +49,11 @@ npx @agentdeskai/browser-tools-server
 - `/accessibility-audit` - Run accessibility audit on current page
 - `/performance-audit` - Run performance audit on current page
 - `/seo-audit` - Run SEO audit on current page
+- `/clone/session/start` - Initialize a clone session workspace
+- `/clone/session/finish` - Mark a clone session as completed or failed
+- `/clone/session/:sessionId` - Inspect a specific session summary
+- `/clone/sessions` - List known clone sessions
+- `ws://<host>:<port>/clone/progress` - Subscribe to clone progress events
 
 ## API Documentation
 
@@ -59,6 +65,8 @@ npx @agentdeskai/browser-tools-server
 - `GET /network-success` - Returns recent successful network requests
 - `GET /all-xhr` - Returns all recent network requests
 - `GET /selected-element` - Returns the currently selected DOM element
+- `GET /clone/session/:sessionId` - Returns metadata about a clone session
+- `GET /clone/sessions` - Returns all known clone sessions
 
 ### POST Endpoints
 
@@ -69,6 +77,8 @@ npx @agentdeskai/browser-tools-server
 - `POST /accessibility-audit` - Run a WCAG-compliant accessibility audit on the current page
 - `POST /performance-audit` - Run a performance audit on the current page
 - `POST /seo-audit` - Run a SEO audit on the current page
+- `POST /clone/session/start` - Allocate workspace and begin a clone session
+- `POST /clone/session/finish` - Update the status of an existing clone session
 
 # Audit Functionality
 

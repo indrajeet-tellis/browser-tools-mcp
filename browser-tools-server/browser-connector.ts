@@ -11,6 +11,7 @@ import { IncomingMessage } from "http";
 import { Socket } from "net";
 import os from "os";
 import { exec } from "child_process";
+import { fileURLToPath } from "url";
 import {
   runPerformanceAudit,
   runAccessibilityAudit,
@@ -20,6 +21,24 @@ import {
 } from "./lighthouse/index.js";
 import * as net from "net";
 import { runBestPracticesAudit } from "./lighthouse/best-practices.js";
+import { CloneSessionService } from "./clone/session-service.js";
+
+const runtimeDir = path.dirname(fileURLToPath(new URL(".", import.meta.url)));
+const portFileDirectory =
+  path.basename(runtimeDir) === "dist"
+    ? runtimeDir
+    : path.join(runtimeDir, "dist");
+
+async function persistPortFile(port: number) {
+  try {
+    await fs.promises.mkdir(portFileDirectory, { recursive: true });
+    const portFilePath = path.join(portFileDirectory, ".port");
+    await fs.promises.writeFile(portFilePath, `${port}\n`, "utf8");
+    console.log(`Persisted discovery port file to ${portFilePath}`);
+  } catch (error) {
+    console.error("Failed to persist .port discovery file", error);
+  }
+}
 
 /**
  * Converts a file path to the appropriate format for the current platform
@@ -247,6 +266,8 @@ app.use(cors());
 // Increase JSON body parser limit to 50MB to handle large screenshots
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
+
+const cloneSessionService = new CloneSessionService(app);
 
 // Helper to recursively truncate strings in any data structure
 function truncateStringsInData(data: any, maxLength: number): any {
@@ -1453,7 +1474,14 @@ export class BrowserConnector {
       });
 
       console.log(`\nFor local access use: http://localhost:${PORT}`);
+
+      // Persist discovery data for MCP clients
+      persistPortFile(PORT).catch((error) => {
+        console.error("Unable to persist .port discovery file", error);
+      });
     });
+
+    cloneSessionService.attachToServer(server);
 
     // Handle server startup errors
     server.on("error", (err: any) => {
@@ -1480,6 +1508,7 @@ export class BrowserConnector {
       try {
         // First shutdown WebSocket connections
         await browserConnector.shutdown();
+        await cloneSessionService.shutdown();
 
         // Then close the HTTP server
         await new Promise<void>((resolve, reject) => {
