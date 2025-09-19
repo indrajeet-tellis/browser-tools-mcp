@@ -68,6 +68,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true; // Required to use sendResponse asynchronously
   }
+
+  if (message.type === "START_CLONE_SESSION") {
+    handleStartCloneSession(message, sendResponse);
+    return true;
+  }
 });
 
 // Validate server identity
@@ -95,6 +100,220 @@ async function validateServerIdentity(host, port) {
     console.error("Error validating server identity:", error);
     return false;
   }
+}
+
+async function handleStartCloneSession(message, sendResponse) {
+  try {
+    const scope = message.scope === "selection" ? "selection" : "page";
+    const settings = await getConnectorSettings();
+
+    const isValid = await validateServerIdentity(
+      settings.serverHost,
+      settings.serverPort
+    );
+
+    if (!isValid) {
+      sendResponse({
+        success: false,
+        error:
+          "Browser tools server is not available. Verify the connection settings and try again.",
+      });
+      return;
+    }
+
+    const body = { scope };
+
+    if (scope === "selection") {
+      const targetSelector = await resolveSelectionTarget(settings);
+      if (targetSelector) {
+        body.targetSelector = targetSelector;
+      }
+    }
+
+    const startResponse = await fetch(
+      `http://${settings.serverHost}:${settings.serverPort}/clone/session/start`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      }
+    );
+
+    if (!startResponse.ok) {
+      sendResponse({
+        success: false,
+        error: `Failed to start clone session (${startResponse.status}).`,
+      });
+      return;
+    }
+
+    const payload = await startResponse.json();
+    const session = payload?.session;
+
+    if (!session || !session.sessionId) {
+      sendResponse({
+        success: false,
+        error: "Clone session start response did not include a session identifier.",
+      });
+      return;
+    }
+
+    sendResponse({ success: true, session });
+
+    const initialEvent = {
+      sessionId: session.sessionId,
+      phase: "initializing",
+      progress: 0,
+      message: "Session initialized",
+      timestamp: new Date().toISOString(),
+    };
+
+    sendCloneSessionEvent(initialEvent, {
+      ...session,
+      status: session.status || "initializing",
+      updatedAt: initialEvent.timestamp,
+      lastProgress: initialEvent,
+    });
+
+    finalizeCloneSession(session, settings, scope).catch((error) => {
+      reportCloneSessionError(
+        session.sessionId,
+        error instanceof Error
+          ? error.message
+          : "Failed to complete clone session."
+      );
+    });
+  } catch (error) {
+    console.error("Error starting clone session:", error);
+    const messageText =
+      error instanceof Error ? error.message : "Failed to start clone session.";
+    sendResponse({ success: false, error: messageText });
+  }
+}
+
+async function finalizeCloneSession(session, settings, scope) {
+  await delay(750);
+
+  const finishResponse = await fetch(
+    `http://${settings.serverHost}:${settings.serverPort}/clone/session/finish`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: session.sessionId,
+        status: "completed",
+        message: `Completed ${scope} clone stub via DevTools panel.`,
+      }),
+      signal: AbortSignal.timeout(5000),
+    }
+  );
+
+  if (!finishResponse.ok) {
+    throw new Error(`Failed to complete clone session (${finishResponse.status}).`);
+  }
+
+  const completionEvent = {
+    sessionId: session.sessionId,
+    phase: "completed",
+    progress: 1,
+    message: `Completed ${scope} clone stub via DevTools panel.`,
+    timestamp: new Date().toISOString(),
+  };
+
+  sendCloneSessionEvent(completionEvent, {
+    ...session,
+    status: "completed",
+    updatedAt: completionEvent.timestamp,
+    lastProgress: completionEvent,
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getConnectorSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["browserConnectorSettings"], (result) => {
+      const settings = result.browserConnectorSettings || {
+        serverHost: "localhost",
+        serverPort: 3025,
+      };
+      resolve(settings);
+    });
+  });
+}
+
+async function resolveSelectionTarget(settings) {
+  try {
+    const response = await fetch(
+      `http://${settings.serverHost}:${settings.serverPort}/selected-element`,
+      { signal: AbortSignal.timeout(2000) }
+    );
+
+    if (!response.ok) {
+      return undefined;
+    }
+
+    const payload = await response.json();
+
+    if (typeof payload === "string") {
+      return payload;
+    }
+
+    if (payload && typeof payload === "object") {
+      if (typeof payload.selector === "string") {
+        return payload.selector;
+      }
+      if (typeof payload.cssPath === "string") {
+        return payload.cssPath;
+      }
+      if (typeof payload.xpath === "string") {
+        return payload.xpath;
+      }
+    }
+  } catch (error) {
+    console.warn("Unable to resolve selection target:", error);
+  }
+
+  return undefined;
+}
+
+function reportCloneSessionError(sessionId, errorMessage) {
+  chrome.runtime.sendMessage(
+    {
+      type: "CLONE_SESSION_ERROR",
+      sessionId,
+      error: errorMessage,
+    },
+    () => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError &&
+        lastError.message &&
+        !lastError.message.includes("Receiving end does not exist")) {
+        console.error("Failed to deliver clone session error message:", lastError);
+      }
+    }
+  );
+}
+
+function sendCloneSessionEvent(event, session) {
+  chrome.runtime.sendMessage(
+    {
+      type: "CLONE_SESSION_EVENT",
+      event,
+      session,
+    },
+    () => {
+      const lastError = chrome.runtime.lastError;
+      if (lastError &&
+        lastError.message &&
+        !lastError.message.includes("Receiving end does not exist")) {
+        console.error("Failed to deliver clone session event:", lastError);
+      }
+    }
+  );
 }
 
 // Helper function to process the tab and run the audit
