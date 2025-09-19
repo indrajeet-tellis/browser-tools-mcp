@@ -466,11 +466,15 @@ function deliverSnapshotChunk(chunk) {
   });
 }
 
-async function streamSnapshotChunks(session, snapshotJson) {
+async function streamSnapshotChunks(
+  session,
+  snapshotJson,
+  payloadType = "dom"
+) {
   const chunkId =
     typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
+      ? `${payloadType}-${crypto.randomUUID()}`
+      : `${payloadType}-${Math.random().toString(36).slice(2)}`;
 
   const chunks = chunkString(snapshotJson, SNAPSHOT_CHUNK_SIZE);
   const totalChunks = chunks.length;
@@ -481,7 +485,7 @@ async function streamSnapshotChunks(session, snapshotJson) {
       chunkId,
       sequence: 0,
       totalChunks: 1,
-      payloadType: "dom",
+      payloadType,
       payloadFormat: "json",
       payload: "",
     });
@@ -495,7 +499,7 @@ async function streamSnapshotChunks(session, snapshotJson) {
       chunkId,
       sequence: index,
       totalChunks,
-      payloadType: "dom",
+      payloadType,
       payloadFormat: "json",
       payload,
     };
@@ -539,7 +543,68 @@ async function handleCaptureDomSnapshot(session, options) {
     throw new Error("Capture function returned an unexpected payload");
   }
 
-  await streamSnapshotChunks(session, result.snapshot);
+  const stylesheetsExpression = `(function(){
+    try {
+      const collect = window.__browserToolsCollectStylesheets;
+      if (typeof collect !== "function") {
+        return { error: "Stylesheet collector not available" };
+      }
+      return { stylesheets: collect() };
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  const computedStylesExpression = `(function(){
+    try {
+      const compute = window.__browserToolsGetComputedStyles;
+      if (typeof compute !== "function") {
+        return { error: "Computed style helper not available" };
+      }
+      return { nodes: compute(${JSON.stringify({
+        rootSelector: capturePayload.rootSelector,
+      })}) };
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  const stylesheetsResult = await evalInInspectedWindow(stylesheetsExpression);
+  const stylesheets = Array.isArray(stylesheetsResult?.stylesheets)
+    ? stylesheetsResult.stylesheets
+    : [];
+  if (stylesheetsResult && stylesheetsResult.error) {
+    console.warn(
+      "collectStylesheets returned an error:",
+      stylesheetsResult.error
+    );
+  }
+
+  const computedStylesResult = await evalInInspectedWindow(
+    computedStylesExpression
+  );
+  const computedStyles = Array.isArray(computedStylesResult?.nodes)
+    ? computedStylesResult.nodes
+    : [];
+  if (computedStylesResult && computedStylesResult.error) {
+    console.warn(
+      "getComputedStyles returned an error:",
+      computedStylesResult.error
+    );
+  }
+
+  const stylesPayload = {
+    capturedAt: new Date().toISOString(),
+    stylesheets,
+    computedStyles,
+  };
+
+  await streamSnapshotChunks(session, result.snapshot, "dom");
+  await streamSnapshotChunks(
+    session,
+    JSON.stringify(stylesPayload),
+    "styles"
+  );
 }
 
 // Validate server identity
