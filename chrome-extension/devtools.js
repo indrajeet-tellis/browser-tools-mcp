@@ -605,6 +605,42 @@ async function handleCaptureDomSnapshot(session, options) {
     JSON.stringify(stylesPayload),
     "styles"
   );
+
+  const assetsExpression = `(function(){
+    try {
+      const collect = window.__browserToolsCollectAssets;
+      if (typeof collect !== "function") {
+        return { error: "Asset collector not available" };
+      }
+      return collect(${JSON.stringify({
+        rootSelector: capturePayload.rootSelector,
+      })});
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  let assetsResult = await evalInInspectedWindow(assetsExpression);
+  if (assetsResult && assetsResult.error) {
+    console.warn("collectAssets returned an error:", assetsResult.error);
+    assetsResult = {
+      capturedAt: new Date().toISOString(),
+      assets: [],
+    };
+  }
+
+  if (!assetsResult || typeof assetsResult !== "object" || Array.isArray(assetsResult)) {
+    assetsResult = {
+      capturedAt: new Date().toISOString(),
+      assets: [],
+    };
+  }
+
+  await streamSnapshotChunks(
+    session,
+    JSON.stringify(assetsResult),
+    "assets"
+  );
 }
 
 // Validate server identity
