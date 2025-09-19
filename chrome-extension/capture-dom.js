@@ -319,8 +319,122 @@
     return results;
   }
 
+  function collectPseudoStateStyles(options = {}) {
+    const rootSelector =
+      typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
+        ? options.rootSelector.trim()
+        : null;
+
+    let targetRoot = document.documentElement;
+
+    if (rootSelector) {
+      const candidate = document.querySelector(rootSelector);
+      if (candidate) {
+        targetRoot = candidate;
+      }
+    }
+
+    if (!targetRoot || !(targetRoot instanceof Element)) {
+      return {
+        capturedAt: new Date().toISOString(),
+        variants: [],
+      };
+    }
+
+    const elements = [
+      { element: targetRoot, path: "0" },
+      ...Array.from(targetRoot.children).map((child, index) => ({
+        element: child,
+        path: buildPath("0", index),
+      })),
+    ];
+
+    const pseudoStates = ["hover", "focus", "active"];
+    const variants = [];
+    const styleSheets = Array.from(document.styleSheets || []);
+
+    for (const sheet of styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (error) {
+        continue;
+      }
+
+      if (!rules) {
+        continue;
+      }
+
+      Array.from(rules).forEach((rule) => {
+        if (!(rule instanceof CSSStyleRule)) {
+          return;
+        }
+
+        const selectorText = rule.selectorText;
+        if (!selectorText) {
+          return;
+        }
+
+        const selectors = selectorText
+          .split(",")
+          .map((selector) => selector.trim())
+          .filter(Boolean);
+
+        pseudoStates.forEach((pseudo) => {
+          if (!selectorText.includes(`:${pseudo}`)) {
+            return;
+          }
+
+          const normalizedSelectors = selectors
+            .filter((selector) => selector.includes(`:${pseudo}`))
+            .map((selector) => selector.replace(new RegExp(`:${pseudo}`, "g"), ""))
+            .map((selector) => selector.trim())
+            .filter(Boolean);
+
+          if (normalizedSelectors.length === 0) {
+            return;
+          }
+
+          elements.forEach(({ element, path }) => {
+            const matches = normalizedSelectors.some((selector) => {
+              try {
+                return selector ? element.matches(selector) : false;
+              } catch (error) {
+                return false;
+              }
+            });
+
+            if (!matches) {
+              return;
+            }
+
+            const styles = {};
+            for (let index = 0; index < rule.style.length; index += 1) {
+              const property = rule.style[index];
+              styles[property] = rule.style.getPropertyValue(property);
+            }
+
+            variants.push({
+              nodeId: path,
+              pseudo,
+              selector: selectorText,
+              stylesheet: sheet.href || null,
+              styles,
+            });
+          });
+        });
+      });
+    }
+
+    return {
+      capturedAt: new Date().toISOString(),
+      variants,
+    };
+  }
+
   window.__browserToolsCaptureDomSnapshot = captureDomSnapshot;
   window.__browserToolsCollectStylesheets = collectStylesheets;
   window.__browserToolsGetComputedStyles = getComputedStyles;
   window.__browserToolsCollectAssets = collectAssetCandidates;
+  window.__browserToolsCollectPseudoStates = collectPseudoStateStyles;
 })();

@@ -641,6 +641,45 @@ async function handleCaptureDomSnapshot(session, options) {
     JSON.stringify(assetsResult),
     "assets"
   );
+
+  const pseudoExpression = `(function(){
+    try {
+      const collect = window.__browserToolsCollectPseudoStates;
+      if (typeof collect !== "function") {
+        return { error: "Pseudo-state collector not available" };
+      }
+      return collect(${JSON.stringify({
+        rootSelector: capturePayload.rootSelector,
+      })});
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  let pseudoResult = await evalInInspectedWindow(pseudoExpression);
+  if (pseudoResult && pseudoResult.error) {
+    console.warn(
+      "collectPseudoStates returned an error:",
+      pseudoResult.error
+    );
+    pseudoResult = {
+      capturedAt: new Date().toISOString(),
+      variants: [],
+    };
+  }
+
+  if (!pseudoResult || typeof pseudoResult !== "object" || Array.isArray(pseudoResult)) {
+    pseudoResult = {
+      capturedAt: new Date().toISOString(),
+      variants: [],
+    };
+  }
+
+  await streamSnapshotChunks(
+    session,
+    JSON.stringify(pseudoResult),
+    "interactions"
+  );
 }
 
 // Validate server identity
