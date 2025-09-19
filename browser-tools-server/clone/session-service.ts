@@ -12,6 +12,7 @@ import type {
   CloneSessionStatus,
   CloneProgressEvent,
   CloneProgressPhase,
+  CloneSnapshotChunk,
 } from "./types.js";
 
 interface SessionRecord extends CloneSessionMetadata {
@@ -43,11 +44,19 @@ interface SnapshotMessage {
   sessions: CloneSessionInfo[];
 }
 
+interface SnapshotState {
+  writeStream: fs.WriteStream;
+  expectedChunks: number;
+  receivedChunks: number;
+  filePath: string;
+}
+
 export class CloneSessionService {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly progressServer = new WebSocketServer({ noServer: true });
   private readonly progressClients = new Set<WebSocket>();
   private readonly sessionsRoot: string;
+  private readonly snapshotStates = new Map<string, SnapshotState>();
 
   constructor(private readonly app: Application) {
     this.sessionsRoot = path.join(os.tmpdir(), "browser-tools-clone");
@@ -121,6 +130,8 @@ export class CloneSessionService {
             record.notes = body.notes;
           }
 
+          await this.closeSnapshot(sessionId);
+
           const phase: CloneProgressPhase =
             nextStatus === "failed" ? "failed" : "completed";
 
@@ -141,6 +152,43 @@ export class CloneSessionService {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : "Failed to finish session";
+          res.status(500).json({ error: message });
+        }
+      }
+    );
+
+    this.app.post(
+      "/clone/session/:sessionId/chunk",
+      async (req: Request, res: Response): Promise<void> => {
+        try {
+          const sessionId = req.params.sessionId;
+          const record = this.sessions.get(sessionId);
+
+          if (!record) {
+            res.status(404).json({ error: "Session not found" });
+            return;
+          }
+
+          const chunk = req.body as CloneSnapshotChunk | undefined;
+
+          if (
+            !chunk ||
+            typeof chunk.sequence !== "number" ||
+            typeof chunk.totalChunks !== "number" ||
+            typeof chunk.payload !== "string"
+          ) {
+            res.status(400).json({ error: "Invalid snapshot chunk payload" });
+            return;
+          }
+
+          await this.appendSnapshotChunk(record, chunk);
+
+          res.status(202).json({ status: "ok" });
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Failed to process snapshot chunk";
           res.status(500).json({ error: message });
         }
       }
@@ -212,6 +260,15 @@ export class CloneSessionService {
   }
 
   public async shutdown(): Promise<void> {
+    const snapshotSessionIds = Array.from(this.snapshotStates.keys());
+    for (const sessionId of snapshotSessionIds) {
+      try {
+        await this.closeSnapshot(sessionId);
+      } catch (error) {
+        console.error("Failed to close snapshot writer", error);
+      }
+    }
+
     for (const client of this.progressClients) {
       try {
         client.close(1001, "Server shutting down");
@@ -260,6 +317,84 @@ export class CloneSessionService {
 
     this.sessions.set(sessionId, record);
     return record;
+  }
+
+  private async appendSnapshotChunk(
+    record: SessionRecord,
+    chunk: CloneSnapshotChunk
+  ) {
+    let state = this.snapshotStates.get(record.sessionId);
+
+    if (!state) {
+      const filePath = path.join(record.workspacePath, "dom-snapshot.json");
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      const writeStream = fs.createWriteStream(filePath, { flags: "w" });
+      state = {
+        writeStream,
+        expectedChunks: chunk.totalChunks,
+        receivedChunks: 0,
+        filePath,
+      };
+      this.snapshotStates.set(record.sessionId, state);
+    }
+
+    if (state.expectedChunks !== chunk.totalChunks) {
+      state.expectedChunks = chunk.totalChunks;
+    }
+
+    if (chunk.sequence !== state.receivedChunks) {
+      throw new Error(
+        `Unexpected chunk sequence for session ${record.sessionId}: expected ${state.receivedChunks}, received ${chunk.sequence}`
+      );
+    }
+
+    const encoding = chunk.payloadFormat === "base64" ? "base64" : "utf8";
+    const writeResult = state.writeStream.write(chunk.payload, encoding);
+
+    if (!writeResult) {
+      await new Promise<void>((resolve) =>
+        state?.writeStream.once("drain", resolve)
+      );
+    }
+
+    state.receivedChunks += 1;
+    record.status = "capturing";
+
+    const progress =
+      state.expectedChunks > 0
+        ? Math.min(state.receivedChunks / state.expectedChunks, 1)
+        : 1;
+
+    this.recordProgress({
+      sessionId: record.sessionId,
+      phase: "capturingDom",
+      progress,
+      message: `Captured ${state.receivedChunks}/${state.expectedChunks} DOM chunks`,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (state.receivedChunks >= state.expectedChunks) {
+      await this.closeSnapshot(record.sessionId);
+    }
+  }
+
+  private async closeSnapshot(sessionId: string) {
+    const state = this.snapshotStates.get(sessionId);
+    if (!state) {
+      return;
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      state.writeStream.end((error) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    this.snapshotStates.delete(sessionId);
   }
 
   private emitProgress(sessionId: string, event: CloneProgressEvent) {
