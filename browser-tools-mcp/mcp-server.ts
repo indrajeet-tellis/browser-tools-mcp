@@ -4,12 +4,26 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import path from "path";
 import fs from "fs";
+import type {
+  CloneScope,
+  CloneToolResult,
+} from "./clone-types.js";
 
 // Create the MCP server
 const server = new McpServer({
   name: "Browser Tools MCP",
   version: "1.2.0",
 });
+
+function createStubCloneResult(scope: CloneScope): CloneToolResult {
+  return {
+    sessionId: `stub-${scope}-${Date.now()}`,
+    scope,
+    status: "pending",
+    message:
+      "Clone tooling is not yet implemented. This placeholder confirms MCP ⇄ browser server connectivity.",
+  };
+}
 
 // Track the discovered server connection
 let discoveredHost = "127.0.0.1";
@@ -338,6 +352,34 @@ server.tool("wipeLogs", "Wipe all browser logs from memory", async () => {
     };
   });
 });
+
+server.tool(
+  "clonePage",
+  "Clone the currently inspected page into a shadcn-compatible project (stub)",
+  async () =>
+    await withServerConnection(async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(createStubCloneResult("page"), null, 2),
+        },
+      ],
+    }))
+);
+
+server.tool(
+  "cloneSelection",
+  "Clone the user-selected DOM subtree into a shadcn-compatible project (stub)",
+  async () =>
+    await withServerConnection(async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(createStubCloneResult("selection"), null, 2),
+        },
+      ],
+    }))
+);
 
 // Define audit categories as enum to match the server's AuditCategory enum
 enum AuditCategory {
