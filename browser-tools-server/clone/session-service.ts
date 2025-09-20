@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { StyleCompiler, type TailwindTokens } from "./style-compiler.js";
+import { ComponentMapper, type ComponentMapping } from "./component-mapper.js";
 
 import type {
   CloneSessionRequest,
@@ -137,9 +138,10 @@ export class CloneSessionService {
 
           await this.finalizeAllSnapshots(sessionId);
 
-          // Generate Tailwind tokens after all snapshots are finalized
+          // Generate analysis artifacts after all snapshots are finalized
           if (nextStatus === "completed") {
             await this.generateTailwindTokens(sessionId);
+            await this.generateComponentMapping(sessionId);
           }
 
           const phase: CloneProgressPhase =
@@ -646,6 +648,76 @@ export class CloneSessionService {
       await fs.promises.writeFile(
         tokensPath,
         JSON.stringify(emptyTokens, null, 2),
+        "utf8"
+      );
+    }
+  }
+
+  private async generateComponentMapping(sessionId: string): Promise<void> {
+    try {
+      const workspacePath = this.getSessionWorkspacePath(sessionId);
+      const domSnapshotPath = path.join(workspacePath, "dom-snapshot.json");
+      
+      if (!fs.existsSync(domSnapshotPath)) {
+        console.warn(`No DOM snapshot found for session ${sessionId}, skipping component mapping`);
+        return;
+      }
+
+      // Load DOM snapshot data
+      const domSnapshotContent = await fs.promises.readFile(domSnapshotPath, "utf8");
+      const domSnapshot = JSON.parse(domSnapshotContent);
+
+      // Initialize the component mapper
+      const mapper = new ComponentMapper();
+      
+      // Generate component mapping
+      const mapping = mapper.mapComponents(domSnapshot);
+      
+      // Save mapping to the session workspace
+      const mappingPath = path.join(workspacePath, "component-mapping.json");
+      await fs.promises.writeFile(
+        mappingPath,
+        JSON.stringify(mapping, null, 2),
+        "utf8"
+      );
+      
+      console.log(`Generated component mapping for session ${sessionId}`);
+      console.log(`Found ${mapping.summary.totalComponents} components:`, mapping.summary.componentTypes);
+      
+      // Emit progress update for component mapping
+      const record = this.sessions.get(sessionId);
+      if (record) {
+        const highConfidenceCount = mapping.summary.highConfidence.length;
+        const event: CloneProgressEvent = {
+          sessionId,
+          phase: "processing",
+          progress: 0.95,
+          message: `Mapped ${mapping.summary.totalComponents} components (${highConfidenceCount} high confidence)`,
+          timestamp: new Date().toISOString(),
+        };
+        
+        this.emitProgress(sessionId, event);
+      }
+      
+    } catch (error) {
+      console.error(`Failed to generate component mapping for session ${sessionId}:`, error);
+      
+      // Create empty mapping file as fallback
+      const workspacePath = this.getSessionWorkspacePath(sessionId);
+      const mappingPath = path.join(workspacePath, "component-mapping.json");
+      const emptyMapping: ComponentMapping = {
+        components: [],
+        summary: {
+          totalComponents: 0,
+          componentTypes: {},
+          highConfidence: [],
+          capturedAt: new Date().toISOString()
+        }
+      };
+      
+      await fs.promises.writeFile(
+        mappingPath,
+        JSON.stringify(emptyMapping, null, 2),
         "utf8"
       );
     }
