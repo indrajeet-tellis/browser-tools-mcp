@@ -718,10 +718,208 @@
     };
   }
 
+  function collectResponsiveSnapshots(options = {}) {
+    const rootSelector =
+      typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
+        ? options.rootSelector.trim()
+        : null;
+
+    let targetRoot = document.documentElement;
+
+    if (rootSelector) {
+      const candidate = document.querySelector(rootSelector);
+      if (candidate) {
+        targetRoot = candidate;
+      }
+    }
+
+    // Define standard breakpoints (mobile-first approach)
+    const breakpoints = [
+      { name: "mobile", width: 375, height: 667 },
+      { name: "tablet", width: 768, height: 1024 },
+      { name: "desktop", width: 1920, height: 1080 }
+    ];
+
+    const currentViewport = {
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
+
+    const snapshots = [];
+    const mediaQueries = [];
+
+    // Collect all media queries from stylesheets
+    const styleSheets = Array.from(document.styleSheets || []);
+    
+    for (const sheet of styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (error) {
+        continue;
+      }
+
+      if (!rules) {
+        continue;
+      }
+
+      Array.from(rules).forEach((rule) => {
+        if (rule.type === CSSRule.MEDIA_RULE) {
+          mediaQueries.push({
+            media: rule.media.mediaText,
+            matches: rule.media.matches,
+            stylesheet: sheet.href || "inline",
+            rules: Array.from(rule.cssRules || []).map(r => r.cssText)
+          });
+        }
+      });
+    }
+
+    // For each breakpoint, capture layout information
+    breakpoints.forEach((breakpoint) => {
+      // Create a snapshot for this breakpoint
+      const snapshot = {
+        breakpoint: breakpoint.name,
+        viewport: {
+          width: breakpoint.width,
+          height: breakpoint.height,
+          isCurrent: currentViewport.width === breakpoint.width && currentViewport.height === breakpoint.height
+        },
+        mediaQueryMatches: [],
+        layoutDeltas: [],
+        computedStyles: []
+      };
+
+      // Check which media queries would match at this breakpoint
+      mediaQueries.forEach((mq) => {
+        let wouldMatch = false;
+        
+        // Simple media query parsing for common patterns
+        const mediaText = mq.media.toLowerCase();
+        
+        if (mediaText.includes('min-width')) {
+          const minWidthMatch = mediaText.match(/min-width:\s*(\d+)px/);
+          if (minWidthMatch) {
+            const minWidth = parseInt(minWidthMatch[1]);
+            wouldMatch = breakpoint.width >= minWidth;
+          }
+        }
+        
+        if (mediaText.includes('max-width')) {
+          const maxWidthMatch = mediaText.match(/max-width:\s*(\d+)px/);
+          if (maxWidthMatch) {
+            const maxWidth = parseInt(maxWidthMatch[1]);
+            wouldMatch = breakpoint.width <= maxWidth;
+          }
+        }
+
+        if (mediaText.includes('min-width') && mediaText.includes('max-width')) {
+          const minWidthMatch = mediaText.match(/min-width:\s*(\d+)px/);
+          const maxWidthMatch = mediaText.match(/max-width:\s*(\d+)px/);
+          if (minWidthMatch && maxWidthMatch) {
+            const minWidth = parseInt(minWidthMatch[1]);
+            const maxWidth = parseInt(maxWidthMatch[1]);
+            wouldMatch = breakpoint.width >= minWidth && breakpoint.width <= maxWidth;
+          }
+        }
+
+        snapshot.mediaQueryMatches.push({
+          media: mq.media,
+          matches: wouldMatch,
+          currentlyMatches: mq.matches,
+          stylesheet: mq.stylesheet,
+          ruleCount: mq.rules.length
+        });
+      });
+
+      // Capture key elements and their computed styles for layout comparison
+      if (targetRoot && targetRoot instanceof Element) {
+        const elements = [targetRoot, ...Array.from(targetRoot.querySelectorAll('*'))];
+        const keyElements = elements.slice(0, 50); // Limit to prevent large payloads
+
+        keyElements.forEach((element, index) => {
+          const computed = window.getComputedStyle(element);
+          const nodeId = `${breakpoint.name}-${index}`;
+          
+          // Capture layout-relevant properties
+          const layoutStyles = {
+            display: computed.display,
+            position: computed.position,
+            width: computed.width,
+            height: computed.height,
+            margin: computed.margin,
+            padding: computed.padding,
+            flexDirection: computed.flexDirection,
+            flexWrap: computed.flexWrap,
+            justifyContent: computed.justifyContent,
+            alignItems: computed.alignItems,
+            gridTemplateColumns: computed.gridTemplateColumns,
+            gridTemplateRows: computed.gridTemplateRows,
+            fontSize: computed.fontSize,
+            lineHeight: computed.lineHeight
+          };
+
+          snapshot.computedStyles.push({
+            nodeId,
+            tagName: element.tagName.toLowerCase(),
+            className: element.className,
+            styles: layoutStyles
+          });
+        });
+      }
+
+      snapshots.push(snapshot);
+    });
+
+    // Calculate layout deltas between breakpoints
+    for (let i = 1; i < snapshots.length; i++) {
+      const current = snapshots[i];
+      const previous = snapshots[i - 1];
+      
+      current.layoutDeltas = [];
+      
+      // Compare computed styles between breakpoints
+      current.computedStyles.forEach((currentStyle, index) => {
+        const previousStyle = previous.computedStyles[index];
+        if (!previousStyle) return;
+        
+        const changes = {};
+        Object.keys(currentStyle.styles).forEach(property => {
+          if (currentStyle.styles[property] !== previousStyle.styles[property]) {
+            changes[property] = {
+              from: previousStyle.styles[property],
+              to: currentStyle.styles[property]
+            };
+          }
+        });
+        
+        if (Object.keys(changes).length > 0) {
+          current.layoutDeltas.push({
+            nodeId: currentStyle.nodeId,
+            tagName: currentStyle.tagName,
+            className: currentStyle.className,
+            changes
+          });
+        }
+      });
+    }
+
+    return {
+      capturedAt: new Date().toISOString(),
+      documentUrl: window.location.href,
+      rootSelector,
+      scope: options.scope || "page",
+      currentViewport,
+      breakpoints: snapshots,
+      totalMediaQueries: mediaQueries.length
+    };
+  }
+
   window.__browserToolsCaptureDomSnapshot = captureDomSnapshot;
   window.__browserToolsCollectStylesheets = collectStylesheets;
   window.__browserToolsGetComputedStyles = getComputedStyles;
   window.__browserToolsCollectAssets = collectAssetCandidates;
   window.__browserToolsCollectPseudoStates = collectPseudoStateStyles;
   window.__browserToolsCollectAnimations = collectAnimations;
+  window.__browserToolsCollectResponsiveSnapshots = collectResponsiveSnapshots;
 })();

@@ -726,6 +726,52 @@ async function handleCaptureDomSnapshot(session, options) {
     JSON.stringify(animationsResult),
     "animations"
   );
+
+  // Capture responsive breakpoint data
+  const responsiveExpression = `(function(){
+    try {
+      const collect = window.__browserToolsCollectResponsiveSnapshots;
+      if (typeof collect !== "function") {
+        return { error: "Responsive collector not available" };
+      }
+      return collect(${JSON.stringify({
+        rootSelector: capturePayload.rootSelector,
+        scope: capturePayload.scope,
+      })});
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  let responsiveResult = await evalInInspectedWindow(responsiveExpression);
+  if (responsiveResult && responsiveResult.error) {
+    console.warn(
+      "collectResponsiveSnapshots returned an error:",
+      responsiveResult.error
+    );
+    responsiveResult = null;
+  }
+
+  if (
+    !responsiveResult ||
+    typeof responsiveResult !== "object" ||
+    Array.isArray(responsiveResult)
+  ) {
+    responsiveResult = {
+      capturedAt: new Date().toISOString(),
+      scope: capturePayload.scope,
+      rootSelector: capturePayload.rootSelector,
+      currentViewport: { width: 0, height: 0 },
+      breakpoints: [],
+      totalMediaQueries: 0
+    };
+  }
+
+  await streamSnapshotChunks(
+    session,
+    JSON.stringify(responsiveResult),
+    "responsive"
+  );
 }
 
 // Validate server identity
