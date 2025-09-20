@@ -7,6 +7,7 @@ import path from "path";
 import os from "os";
 import { StyleCompiler, type TailwindTokens } from "./style-compiler.js";
 import { ComponentMapper, type ComponentMapping } from "./component-mapper.js";
+import { ProjectGenerator, type ProjectScaffoldConfig } from "./project-generator.js";
 
 import type {
   CloneSessionRequest,
@@ -164,6 +165,69 @@ export class CloneSessionService {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : "Failed to finish session";
+          res.status(500).json({ error: message });
+        }
+      }
+    );
+
+    // Add project generation endpoint
+    this.app.post(
+      "/clone/session/:sessionId/generate",
+      async (req: Request, res: Response): Promise<void> => {
+        try {
+          const sessionId = req.params.sessionId;
+          const record = this.sessions.get(sessionId);
+
+          if (!record) {
+            res.status(404).json({ error: "Session not found" });
+            return;
+          }
+
+          if (record.status !== "completed") {
+            res.status(400).json({ error: "Session must be completed before generating project" });
+            return;
+          }
+
+          const config: ProjectScaffoldConfig = {
+            projectName: req.body.projectName || `cloned-site-${sessionId.slice(0, 8)}`,
+            outputPath: req.body.outputPath || path.join(os.tmpdir(), "browser-tools-generated"),
+            framework: req.body.framework || "nextjs",
+            includeTypescript: req.body.includeTypescript !== false,
+            includeTailwind: req.body.includeTailwind !== false,
+            includeShadcn: req.body.includeShadcn !== false
+          };
+
+          // Emit progress for project generation start
+          const startEvent: CloneProgressEvent = {
+            sessionId,
+            phase: "generating",
+            progress: 0,
+            message: "Starting project generation...",
+            timestamp: new Date().toISOString(),
+          };
+          this.emitProgress(sessionId, startEvent);
+
+          // Generate the project
+          const generator = new ProjectGenerator();
+          const workspacePath = this.getSessionWorkspacePath(sessionId);
+          const result = await generator.generateProject(workspacePath, config);
+
+          // Emit completion progress
+          const completeEvent: CloneProgressEvent = {
+            sessionId,
+            phase: result.success ? "completed" : "failed",
+            progress: 1,
+            message: result.success 
+              ? `Generated ${result.generatedFiles.length} files` 
+              : `Generation failed: ${result.errors.join(", ")}`,
+            timestamp: new Date().toISOString(),
+          };
+          this.emitProgress(sessionId, completeEvent);
+
+          res.json(result);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Failed to generate project";
           res.status(500).json({ error: message });
         }
       }

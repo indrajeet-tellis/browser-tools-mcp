@@ -107,6 +107,82 @@
         .action-button:hover {
             background-color: #5a5a5a;
         }
+        .progress-container {
+            margin: 16px 0;
+            padding: 12px;
+            background-color: #2a2a2a;
+            border-radius: 6px;
+            border: 1px solid #404040;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background-color: #404040;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-bottom: 8px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+        .progress-text {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-bottom: 4px;
+        }
+        .progress-details {
+            font-size: 11px;
+            color: #6b7280;
+        }
+        .generation-panel {
+            margin-top: 16px;
+            padding: 16px;
+            background-color: #1a1a1a;
+            border-radius: 6px;
+            border: 1px solid #404040;
+        }
+        .generation-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .form-group label {
+            font-size: 12px;
+            color: #d1d5db;
+        }
+        .form-group input, .form-group select {
+            padding: 6px 8px;
+            background-color: #374151;
+            border: 1px solid #4b5563;
+            border-radius: 4px;
+            color: white;
+            font-size: 12px;
+        }
+        .generate-button {
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+        .generate-button:hover {
+            opacity: 0.9;
+        }
+        .generate-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
         .action-button:disabled {
             opacity: 0.6;
             cursor: not-allowed;
@@ -189,6 +265,50 @@
         <div class="clone-status" id="clone-status">
             <span class="clone-status-indicator idle" id="clone-status-indicator"></span>
             <span id="clone-status-text">No clone session activity yet.</span>
+        </div>
+        
+        <!-- Enhanced Progress Display -->
+        <div class="progress-container" id="progress-container" style="display: none;">
+            <div class="progress-text" id="progress-phase">Initializing...</div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill"></div>
+            </div>
+            <div class="progress-details" id="progress-details">Waiting for progress updates...</div>
+        </div>
+        
+        <!-- Project Generation Panel -->
+        <div class="generation-panel" id="generation-panel" style="display: none;">
+            <h4 style="margin: 0 0 12px 0; color: #d1d5db;">Generate Project</h4>
+            <div class="generation-controls">
+                <div class="form-group">
+                    <label for="project-name">Project Name</label>
+                    <input type="text" id="project-name" placeholder="my-cloned-site" value="my-cloned-site">
+                </div>
+                <div class="form-group">
+                    <label for="framework">Framework</label>
+                    <select id="framework">
+                        <option value="nextjs">Next.js</option>
+                        <option value="vite-react">Vite + React</option>
+                    </select>
+                </div>
+                <div style="display: flex; gap: 12px;">
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d1d5db;">
+                        <input type="checkbox" id="include-typescript" checked>
+                        TypeScript
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d1d5db;">
+                        <input type="checkbox" id="include-tailwind" checked>
+                        Tailwind CSS
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: #d1d5db;">
+                        <input type="checkbox" id="include-shadcn" checked>
+                        shadcn/ui
+                    </label>
+                </div>
+                <button id="generate-project" class="generate-button" disabled>
+                    Generate Project
+                </button>
+            </div>
         </div>
     </div>
 
