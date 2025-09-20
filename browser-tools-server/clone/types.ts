@@ -14,6 +14,7 @@ export type CloneProgressPhase =
   | "capturingStyles"
   | "capturingAssets"
   | "capturingInteractions"
+  | "capturingAnimations"
   | "capturingResponsiveStates"
   | "processing"
   | "generating"
@@ -25,6 +26,7 @@ export type CloneSnapshotPayloadType =
   | "styles"
   | "assets"
   | "interactions"
+  | "animations"
   | "responsive";
 
 export type CloneSnapshotPayloadFormat = "json" | "base64";

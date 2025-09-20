@@ -420,6 +420,8 @@ export class CloneSessionService {
         return "capturingAssets";
       case "interactions":
         return "capturingInteractions";
+      case "animations":
+        return "capturingAnimations";
       case "responsive":
         return "capturingResponsiveStates";
       default:
@@ -440,6 +442,8 @@ export class CloneSessionService {
         return path.join(workspacePath, "assets.json");
       case "interactions":
         return path.join(workspacePath, "interactions.json");
+      case "animations":
+        return path.join(workspacePath, "animations.json");
       case "responsive":
         return path.join(workspacePath, "responsive.json");
       default:

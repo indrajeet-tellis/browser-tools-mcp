@@ -680,6 +680,52 @@ async function handleCaptureDomSnapshot(session, options) {
     JSON.stringify(pseudoResult),
     "interactions"
   );
+
+  const animationsExpression = `(function(){
+    try {
+      const collect = window.__browserToolsCollectAnimations;
+      if (typeof collect !== "function") {
+        return { error: "Animation collector not available" };
+      }
+      return collect(${JSON.stringify({
+        rootSelector: capturePayload.rootSelector,
+        scope: capturePayload.scope,
+      })});
+    } catch (error) {
+      return { error: error && error.message ? error.message : String(error) };
+    }
+  })();`;
+
+  let animationsResult = await evalInInspectedWindow(animationsExpression);
+  if (animationsResult && animationsResult.error) {
+    console.warn(
+      "collectAnimations returned an error:",
+      animationsResult.error
+    );
+    animationsResult = null;
+  }
+
+  if (
+    !animationsResult ||
+    typeof animationsResult !== "object" ||
+    Array.isArray(animationsResult)
+  ) {
+    animationsResult = {
+      capturedAt: new Date().toISOString(),
+      scope: capturePayload.scope,
+      rootSelector: capturePayload.rootSelector,
+      cssAnimations: [],
+      transitions: [],
+      keyframes: [],
+      timeline: [],
+    };
+  }
+
+  await streamSnapshotChunks(
+    session,
+    JSON.stringify(animationsResult),
+    "animations"
+  );
 }
 
 // Validate server identity

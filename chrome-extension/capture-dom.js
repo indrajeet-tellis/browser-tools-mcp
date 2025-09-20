@@ -184,6 +184,51 @@
       .filter((url) => !url.startsWith("data:"));
   };
 
+  const splitStyleList = (value) => {
+    if (!value || typeof value !== "string") {
+      return [];
+    }
+
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0 && entry.toLowerCase() !== "none");
+  };
+
+  const getListValue = (list, index) => {
+    if (!Array.isArray(list) || list.length === 0) {
+      return undefined;
+    }
+    const clampedIndex = Math.min(Math.max(index, 0), list.length - 1);
+    return list[clampedIndex];
+  };
+
+  const parseTimeToMs = (value) => {
+    if (!value || typeof value !== "string") {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+
+    const numeric = Number.parseFloat(trimmed);
+    if (!Number.isFinite(numeric)) {
+      return null;
+    }
+
+    if (trimmed.endsWith("ms")) {
+      return numeric;
+    }
+
+    if (trimmed.endsWith("s")) {
+      return numeric * 1000;
+    }
+
+    return numeric;
+  };
+
   function collectAssetCandidates(options = {}) {
     const rootSelector =
       typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
@@ -432,9 +477,251 @@
     };
   }
 
+  function collectAnimations(options = {}) {
+    const rootSelector =
+      typeof options.rootSelector === "string" && options.rootSelector.trim().length > 0
+        ? options.rootSelector.trim()
+        : null;
+
+    let targetRoot = document.documentElement;
+
+    if (rootSelector) {
+      const candidate = document.querySelector(rootSelector);
+      if (candidate) {
+        targetRoot = candidate;
+      }
+    }
+
+    if (!targetRoot || !(targetRoot instanceof Element)) {
+      return {
+        capturedAt: new Date().toISOString(),
+        documentUrl: window.location.href,
+        rootSelector,
+        scope: options.scope || "page",
+        cssAnimations: [],
+        transitions: [],
+        keyframes: [],
+        timeline: [],
+      };
+    }
+
+    const maxElements =
+      typeof options.maxElements === "number" && Number.isFinite(options.maxElements)
+        ? Math.max(1, options.maxElements)
+        : 1000;
+
+    const elements = [];
+    const pathMap = new Map();
+    const workQueue = [{ element: targetRoot, path: "0" }];
+    let truncated = false;
+
+    while (workQueue.length > 0) {
+      const current = workQueue.shift();
+      if (!current || !(current.element instanceof Element)) {
+        continue;
+      }
+
+      pathMap.set(current.element, current.path);
+
+      if (elements.length < maxElements) {
+        elements.push(current);
+      } else {
+        truncated = true;
+      }
+
+      const children = Array.from(current.element.children);
+      for (let index = 0; index < children.length; index += 1) {
+        const child = children[index];
+        workQueue.push({
+          element: child,
+          path: buildPath(current.path, index),
+        });
+      }
+    }
+
+    const cssAnimations = [];
+    const transitions = [];
+
+    elements.forEach(({ element, path }) => {
+      const computed = window.getComputedStyle(element);
+
+      const names = splitStyleList(computed.animationName);
+      const durations = splitStyleList(computed.animationDuration);
+      const delays = splitStyleList(computed.animationDelay);
+      const timingFunctions = splitStyleList(computed.animationTimingFunction);
+      const iterationCounts = splitStyleList(computed.animationIterationCount);
+      const directions = splitStyleList(computed.animationDirection);
+      const fillModes = splitStyleList(computed.animationFillMode);
+      const playStates = splitStyleList(computed.animationPlayState);
+
+      names.forEach((name, index) => {
+        if (!name || name.toLowerCase() === "none") {
+          return;
+        }
+
+        cssAnimations.push({
+          nodeId: path,
+          tagName: element.tagName.toLowerCase(),
+          name,
+          durationMs: parseTimeToMs(getListValue(durations, index) || ""),
+          delayMs: parseTimeToMs(getListValue(delays, index) || ""),
+          timingFunction: getListValue(timingFunctions, index) || undefined,
+          iterationCount: getListValue(iterationCounts, index) || undefined,
+          direction: getListValue(directions, index) || undefined,
+          fillMode: getListValue(fillModes, index) || undefined,
+          playState: getListValue(playStates, index) || undefined,
+        });
+      });
+
+      const transitionProperties = splitStyleList(computed.transitionProperty);
+      const transitionDurations = splitStyleList(computed.transitionDuration);
+      const transitionDelays = splitStyleList(computed.transitionDelay);
+      const transitionTimingFunctions = splitStyleList(
+        computed.transitionTimingFunction
+      );
+
+      transitionProperties.forEach((property, index) => {
+        if (!property) {
+          return;
+        }
+
+        transitions.push({
+          nodeId: path,
+          tagName: element.tagName.toLowerCase(),
+          property,
+          durationMs: parseTimeToMs(
+            getListValue(transitionDurations, index) || ""
+          ),
+          delayMs: parseTimeToMs(getListValue(transitionDelays, index) || ""),
+          timingFunction:
+            getListValue(transitionTimingFunctions, index) || undefined,
+        });
+      });
+    });
+
+    const keyframes = [];
+    const styleSheets = Array.from(document.styleSheets || []);
+
+    for (const sheet of styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch (error) {
+        continue;
+      }
+
+      if (!rules) {
+        continue;
+      }
+
+      Array.from(rules).forEach((rule) => {
+        if (rule.type === CSSRule.KEYFRAMES_RULE) {
+          const frames = Array.from(rule.cssRules || []).map((frame) => {
+            const properties = {};
+            if (frame.style) {
+              for (let index = 0; index < frame.style.length; index += 1) {
+                const property = frame.style[index];
+                properties[property] = frame.style.getPropertyValue(property);
+              }
+            }
+            return {
+              keyText: frame.keyText,
+              properties,
+            };
+          });
+
+          keyframes.push({
+            name: rule.name,
+            frames,
+            stylesheet: sheet.href || null,
+          });
+        }
+      });
+    }
+
+    const timeline = [];
+
+    if (typeof document.getAnimations === "function") {
+      try {
+        const activeAnimations = document.getAnimations({ subtree: true });
+
+        activeAnimations.forEach((animation) => {
+          const effect = animation.effect;
+          const target =
+            effect && typeof effect === "object" && "target" in effect
+              ? effect.target
+              : null;
+
+          let nodeId = null;
+          if (target instanceof Element) {
+            nodeId = pathMap.get(target) || null;
+          }
+
+          let computedTiming = null;
+          if (
+            effect &&
+            typeof effect.getComputedTiming === "function"
+          ) {
+            try {
+              computedTiming = effect.getComputedTiming();
+            } catch (error) {
+              computedTiming = null;
+            }
+          }
+
+          let keyframeData = null;
+          if (effect && typeof effect.getKeyframes === "function") {
+            try {
+              keyframeData = effect.getKeyframes();
+            } catch (error) {
+              keyframeData = null;
+            }
+          }
+
+          timeline.push({
+            id: typeof animation.id === "string" ? animation.id : null,
+            type:
+              typeof animation.type === "string"
+                ? animation.type
+                : undefined,
+            playState: animation.playState,
+            startTime: animation.startTime,
+            currentTime: animation.currentTime,
+            playbackRate: animation.playbackRate,
+            timelineTime:
+              animation.timeline &&
+              typeof animation.timeline.currentTime === "number"
+                ? animation.timeline.currentTime
+                : null,
+            nodeId,
+            computedTiming,
+            keyframes: keyframeData,
+          });
+        });
+      } catch (error) {
+        timeline.push({
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return {
+      capturedAt: new Date().toISOString(),
+      documentUrl: window.location.href,
+      rootSelector,
+      scope: options.scope || "page",
+      truncated,
+      cssAnimations,
+      transitions,
+      keyframes,
+      timeline,
+    };
+  }
+
   window.__browserToolsCaptureDomSnapshot = captureDomSnapshot;
   window.__browserToolsCollectStylesheets = collectStylesheets;
   window.__browserToolsGetComputedStyles = getComputedStyles;
   window.__browserToolsCollectAssets = collectAssetCandidates;
   window.__browserToolsCollectPseudoStates = collectPseudoStateStyles;
+  window.__browserToolsCollectAnimations = collectAnimations;
 })();
