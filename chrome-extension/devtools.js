@@ -1118,8 +1118,53 @@ function captureAndSendElement() {
       if (!el) return null;
 
       const rect = el.getBoundingClientRect();
+      
+      // Generate a unique reference ID for this element
+      const generateElementPath = (element) => {
+        const path = [];
+        let current = element;
+        
+        while (current && current !== document.documentElement) {
+          let selector = current.tagName.toLowerCase();
+          
+          // Add ID if available
+          if (current.id) {
+            selector += '#' + current.id;
+            path.unshift(selector);
+            break; // ID should be unique, so we can stop here
+          }
+          
+          // Add class if available
+          if (current.className && typeof current.className === 'string') {
+            const classes = current.className.trim().split(/\\s+/).slice(0, 2); // Take first 2 classes
+            if (classes.length > 0) {
+              selector += '.' + classes.join('.');
+            }
+          }
+          
+          // Add nth-child position for uniqueness
+          if (current.parentElement) {
+            const siblings = Array.from(current.parentElement.children);
+            const index = siblings.indexOf(current);
+            if (siblings.filter(s => s.tagName === current.tagName).length > 1) {
+              selector += ':nth-child(' + (index + 1) + ')';
+            }
+          }
+          
+          path.unshift(selector);
+          current = current.parentElement;
+        }
+        
+        return path.join(' > ');
+      };
+      
+      // Generate unique nodeId
+      const elementPath = generateElementPath(el);
+      const nodeId = 'sel_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 
       return {
+        nodeId: nodeId,
+        elementPath: elementPath,
         tagName: el.tagName,
         id: el.id,
         className: el.className,
@@ -1134,7 +1179,8 @@ function captureAndSendElement() {
           top: rect.top,
           left: rect.left
         },
-        innerHTML: el.innerHTML.substring(0, 500)
+        innerHTML: el.innerHTML.substring(0, 500),
+        timestamp: Date.now()
       };
     })()`,
     (result, isException) => {
