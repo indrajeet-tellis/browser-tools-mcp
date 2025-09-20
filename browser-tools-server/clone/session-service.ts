@@ -5,6 +5,7 @@ import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { StyleCompiler, type TailwindTokens } from "./style-compiler.js";
 
 import type {
   CloneSessionRequest,
@@ -135,6 +136,11 @@ export class CloneSessionService {
           }
 
           await this.finalizeAllSnapshots(sessionId);
+
+          // Generate Tailwind tokens after all snapshots are finalized
+          if (nextStatus === "completed") {
+            await this.generateTailwindTokens(sessionId);
+          }
 
           const phase: CloneProgressPhase =
             nextStatus === "failed" ? "failed" : "completed";
@@ -580,6 +586,68 @@ export class CloneSessionService {
     const entries = Array.from(sessionStates.entries());
     for (const [payloadType, state] of entries) {
       await this.finalizeSnapshot(sessionId, payloadType as CloneSnapshotPayloadType, state);
+    }
+  }
+
+  private async generateTailwindTokens(sessionId: string): Promise<void> {
+    try {
+      const workspacePath = this.getSessionWorkspacePath(sessionId);
+      
+      // Initialize the style compiler
+      const compiler = new StyleCompiler();
+      
+      // Generate tokens from captured styles
+      const tokens = compiler.inferTokens(workspacePath);
+      
+      // Save tokens to the session workspace
+      const tokensPath = path.join(workspacePath, "tailwind-tokens.json");
+      await fs.promises.writeFile(
+        tokensPath,
+        JSON.stringify(tokens, null, 2),
+        "utf8"
+      );
+      
+      console.log(`Generated Tailwind tokens for session ${sessionId}`);
+      console.log(`Token summary:`, tokens.summary);
+      
+      // Emit progress update for token generation
+      const record = this.sessions.get(sessionId);
+      if (record) {
+        const event: CloneProgressEvent = {
+          sessionId,
+          phase: "processing",
+          progress: 0.9,
+          message: `Generated ${tokens.colors.length} color tokens, ${tokens.spacing.length} spacing tokens, ${tokens.typography.length} typography tokens`,
+          timestamp: new Date().toISOString(),
+        };
+        
+        this.emitProgress(sessionId, event);
+      }
+      
+    } catch (error) {
+      console.error(`Failed to generate Tailwind tokens for session ${sessionId}:`, error);
+      
+      // Create empty tokens file as fallback
+      const workspacePath = this.getSessionWorkspacePath(sessionId);
+      const tokensPath = path.join(workspacePath, "tailwind-tokens.json");
+      const emptyTokens: TailwindTokens = {
+        colors: [],
+        spacing: [],
+        typography: [],
+        summary: {
+          primaryColors: [],
+          secondaryColors: [],
+          spacingScale: [],
+          fontStacks: [],
+          capturedAt: new Date().toISOString()
+        }
+      };
+      
+      await fs.promises.writeFile(
+        tokensPath,
+        JSON.stringify(emptyTokens, null, 2),
+        "utf8"
+      );
     }
   }
 
